@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+import re
+import os
+from pathlib import Path
+import pandas as pd
+
+def parse_paml_results(result_file):
+    """解析PAML codeml输出文件"""
+    with open(result_file, 'r') as f:
+        content = f.read()
+    
+    results = {}
+    
+    # 提取likelihood值
+    lnl_pattern = r'lnL.*?:\s+([-\d.]+)'
+    lnl_matches = re.findall(lnl_pattern, content)
+    
+    # 提取omega值
+    omega_pattern = r'omega.*?=\s+([\d.]+)'
+    omega_matches = re.findall(omega_pattern, content)
+    
+    # 提取正选择位点
+    sites_pattern = r'Bayes Empirical Bayes.*?Positively selected sites(.*?)The grid'
+    sites_match = re.search(sites_pattern, content, re.DOTALL)
+    
+    positive_sites = []
+    if sites_match:
+        sites_text = sites_match.group(1)
+        site_lines = re.findall(r'(\d+)\s+\w+\s+([\d.]+)\*+', sites_text)
+        positive_sites = [(int(pos), float(prob)) for pos, prob in site_lines]
+    
+    results['lnL'] = lnl_matches
+    results['omega'] = omega_matches
+    results['positive_sites'] = positive_sites
+    
+    return results
+
+def likelihood_ratio_test(lnl_null, lnl_alt, df):
+    """似然比检验"""
+    from scipy import stats
+    lr = 2 * (lnl_alt - lnl_null)
+    p_value = stats.chi2.sf(lr, df)
+    return lr, p_value
+
+def screen_positive_selection(results_dir, output_file):
+    """筛选有正选择信号的基因"""
+    genes_data = []
+    
+    for gene_dir in Path(results_dir).glob('*_paml'):
+        gene_name = gene_dir.name.replace('_paml', '')
+        result_file = gene_dir / 'results.txt'
+        
+        if not result_file.exists():
+            continue
+        
+        try:
+            results = parse_paml_results(result_file)
+            
+            # M7 vs M8 比较（常用的正选择检验）
+            if len(results['lnL']) >= 2:
+                lnl_m7 = float(results['lnL'][-2])
+                lnl_m8 = float(results['lnL'][-1])
+                lr, p_value = likelihood_ratio_test(lnl_m7, lnl_m8, 2)
+                
+                genes_data.append({
+                    'gene': gene_name,
+                    'lnL_M7': lnl_m7,
+                    'lnL_M8': lnl_m8,
+                    'LR': lr,
+                    'p_value': p_value,
+                    'omega': results['omega'][-1] if results['omega'] else 'NA',
+                    'n_positive_sites': len(results['positive_sites']),
+                    'positive_sites': ','.join([f"{pos}({prob:.3f})" 
+                                               for pos, prob in results['positive_sites'][:10]])
+                })
+        except Exception as e:
+            print(f"Error processing {gene_name}: {e}")
+    
+    df = pd.DataFrame(genes_data)
+    
+    # FDR校正
+    from statsmodels.stats.multitest import multipletests
+    if len(df) > 0:
+        _, df['p_adjusted'], _, _ = multipletests(df['p_value'], method='fdr_bh')
+        df = df.sort_values('p_adjusted')
+    
+    df.to_csv(output_file, index=False)
+    
+    # 筛选显著的基因
+    significant = df[df['p_adjusted'] < 0.05]
+    print(f"
+找到 {len(significant)} 个有显著正选择信号的基因")
+    print(significant[['gene', 'omega', 'p_adjusted', 'n_positive_sites']].head(10))
+    
+    return df
+
+# 使用示例
+if __name__ == '__main__':
+    results = screen_positive_selection('./results', 'positive_selection_summary.csv')
