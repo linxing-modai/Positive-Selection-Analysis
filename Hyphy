@@ -1,0 +1,19 @@
+#!/bin/bash
+# 使用HyPhy进行正选择分析
+
+run_hyphy_absrel() {
+    local alignment=$1
+    local tree=$2
+    local output=$3
+    
+    hyphy absrel \
+        --alignment ${alignment} \
+        --tree ${tree} \
+        --output ${output}
+}
+
+# 批量运行
+for gene in ./alignments/*.fasta; do
+    name=$(basename ${gene} .fasta)
+    run_hyphy_absrel ${gene} ./species.tree ./hyphy_results/${name}.json
+done
